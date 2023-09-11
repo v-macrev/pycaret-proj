@@ -21,7 +21,7 @@ This repository contains a comprehensive analysis of projections using PyCaret, 
 2. **Clone the Repository**:
 
     ```
-    git clone https://github.com/yourusername/PyCaret-Projections.git
+    git clone https://github.com/v-macrev/pycaret-proj.git
     cd PyCaret-Projections
     ```
 
