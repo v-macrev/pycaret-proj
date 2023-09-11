@@ -22,7 +22,7 @@ This repository contains a comprehensive analysis of projections using PyCaret, 
 
     ```
     git clone https://github.com/v-macrev/pycaret-proj.git
-    cd PyCaret-Projections
+    cd pycaret-proj
     ```
 
 3. **Run the Notebooks**: Explore the Jupyter notebooks in the `notebooks` directory to dive into different projection scenarios.
