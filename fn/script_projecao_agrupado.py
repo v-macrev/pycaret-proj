@@ -1,89 +1,128 @@
-def gera_proj_agrup(molecula, num_meses):
-    #%% Importando bibliotecas
-    import pandas as pd
-    import numpy as np
-    from pycaret.time_series import TSForecastingExperiment
-    from dateutil.relativedelta import relativedelta
-    from tqdm import tqdm
-    from fn.db_connection import db_connection
+# -*- coding: utf-8 -*-
+"""
+Created on Mon Jul 17 11:15:28 2023
 
-    # Get the database connection
-    engine = db_connection()
+@author: a0040447, v0042447
+"""
+
+import logging
+import joblib
+import hashlib
+from datetime import datetime
+
+# Importando bibliotecas
+import pandas as pd
+import numpy as np
+import gc
+from pycaret.time_series import TSForecastingExperiment
+from dateutil.relativedelta import relativedelta
+from sqlalchemy import create_engine
+from sqlalchemy.engine.url import URL
+from tqdm import tqdm
+from connect import conn
+connections = conn()
+
+logger = logging.getLogger(__name__)
     
-    #%% Query molecule list
-    def consulta_db():
-        query = """SELECT
-                    	FF1.molecula
-                    FROM
-                    	int_mercado_nc.lista_nobrega AS FF1
-                    LEFT JOIN (
-                    	SELECT
-                    		DISTINCT molecula
-                    	FROM
-                    		int_mercado_nc.lista_nobrega_previsoes_moleculas) AS FF2 ON
-                    	FF1.molecula = FF2.molecula
-                    WHERE
-                    	FF2.molecula IS NULL
-                    	AND (FF1.prioridade = 1
-                    		OR FF1.prioridade = 2)
-                    ORDER BY
-                    	FF1.molecula"""
-        
-        results = pd.read_sql(query, engine)
-        opcoes = list(results['molecula'])
-        return opcoes
-    
-    #%% Query PMB data
-    erros = []
-    df_previsoes = pd.DataFrame()
-    
-    opcao_selecionada_molecula = molecula.lstrip()
-    #Loop through selected molecule options
+
+# Instead of print('message'), use:
+logger.info('message')
+
+def gera_proj_agrup(lista_consulta, n, model_folder):
     try:
-        query = f"""select
-                    	FF.dt_periodo,
-                    	sum(FF.qt_unidade) as qt_unidade
-                    from
-                    	((
-                    	select
-                    		PMB.dt_periodo,
-                    		PMB.cd_fcc,
-                    		sum(PMB.qt_unidade) as qt_unidade
-                    	from
-                    		pmb.fato_pmb as PMB
-                    	group by
-                    		PMB.dt_periodo,
-                    		PMB.cd_fcc)
-                    union 
-                            			(
-                    select
-                    	cast(PMB2.dt_periodo as date) as dt_periodo,
-                    	PMB2.cd_fcc,
-                    	sum(PMB2.qtde) as qt_unidade
-                    from
-                    	int_mercado_nc.pmb_hist_tmp2 as PMB2
-                    where
-                    	PMB2.dt_periodo < (
-                    	select
-                    		min(FF2.dt_periodo)
-                    	from
-                    		pmb.fato_pmb as FF2)
-                    group by
-                    	PMB2.dt_periodo,
-                    	PMB2.cd_fcc)) as FF
-                    inner join int_mercado_nc.fcc_molecula_concat as MOL on
-                    	MOL.cd_fcc = FF.cd_fcc
-                    where
-                    	MOL.dc_molecula_portugues like '{opcao_selecionada_molecula}'
-                    group by
-                    	FF.dt_periodo
-                    order by
-                    	FF.dt_periodo"""
+        logger.info("Starting the gera_proj_seg function")
+    
+        now = datetime.now()
+        month = now.strftime("%m")
+        year = now.strftime("%Y")
+
+        # Consulta lista mercado montado
+        def consulta_db():
+            logger.info("Starting consulta_db function")
+            try:
+                with connections.cursor() as cursor:
+                    query = """
+                        select distinct dc_molecula_portugues
+                        from pmb.dm_mole_pmb
+                        order by dc_molecula_portugues
+                    """
+                    cursor.execute(query)
+                    results = cursor.fetchall()
+                    columns = [col[0] for col in cursor.description]
+                    df = pd.DataFrame(results, columns=columns)
+                opcoes = df['dc_molecula_portugues'].tolist()
+                return opcoes
+            finally:
+                cursor.close()
         
-        df = pd.read_sql_query(query, engine)
-            
-        #%% Full Time Series
-        # Format DF
+        # Consulta dados pmb
+        erros = []
+        df_previsoes = pd.DataFrame()
+        
+        def generate_shortened_identifier(lista_consulta):
+            concatenated_string = '_'.join(lista_consulta)
+            sha256_hash = hashlib.sha256(concatenated_string.encode()).hexdigest()
+            return sha256_hash
+
+        opcao_selecionada_molecula = lista_consulta.lstrip()
+        molecula = generate_shortened_identifier(opcao_selecionada_molecula)
+
+        logger.info("Starting the query")
+        query = f"""select
+                        FF.dt_periodo,
+                        sum(FF.qt_unidade) as qt_unidade
+                    from
+                        ((
+                        select
+                            PMB.dt_periodo,
+                            PMB.cd_fcc,
+                            sum(PMB.qt_unidade) as qt_unidade
+                        from
+                            pmb.fato_pmb as PMB
+                        group by
+                            PMB.dt_periodo,
+                            PMB.cd_fcc)
+                    union 
+                                        (
+                    select
+                        cast(PMB2.dt_periodo as date) as dt_periodo,
+                        PMB2.cd_fcc,
+                        sum(PMB2.qtde) as qt_unidade
+                    from
+                        int_mercado_nc.pmb_hist_tmp2 as PMB2
+                    where
+                        PMB2.dt_periodo < (
+                        select
+                            min(FF2.dt_periodo)
+                        from
+                            pmb.fato_pmb as FF2)
+                    group by
+                        PMB2.dt_periodo,
+                        PMB2.cd_fcc)) as FF
+                    inner join int_mercado_nc.fcc_molecula_concat as MOL on
+                        MOL.cd_fcc = FF.cd_fcc
+                    where
+                        MOL.dc_molecula_portugues like '{opcao_selecionada_molecula}'
+                    group by
+                        FF.dt_periodo
+                    order by
+                        FF.dt_periodo"""
+        
+        print(query)
+        logger.debug("Query: %s", query)
+        try:
+            logger.debug("Conexão Iniciando: %s", query)
+            with connections.cursor() as cursor:
+                logger.debug("Query Iniciando: %s", query)
+                cursor.execute(query)
+                results = cursor.fetchall()
+                columns = [col[0] for col in cursor.description]
+                df = pd.DataFrame(results, columns=columns)
+        finally:
+                cursor.close()
+        
+        # Série Temporal Completa
+        #Formatar DF
         def formata_df(df):
             df_formatado=df_formatado=df.copy()
             datas_desejadas = pd.date_range(start='2009-01-01', end=max(df_formatado['dt_periodo']), freq='MS')
@@ -93,15 +132,15 @@ def gera_proj_agrup(molecula, num_meses):
             df_formatado['dt_periodo'] = pd.to_datetime(df_formatado['dt_periodo'], format='%Y-%m-%d', dayfirst=True)
             df_formatado = df_formatado.fillna(0)
             return df_formatado
-    
+
         df_formatado = formata_df(df)
         df_antes_pan = df_formatado[df_formatado['dt_periodo'] <= '2020-03-01']
         df_apos_pan = df_formatado[df_formatado['dt_periodo'] > '2020-03-01']
         df['dt_periodo'] = pd.to_datetime(df['dt_periodo'])
         
-        #%% Cross-validation (conducted in 2023)
-        # Build prediction DataFrame
-        n = num_meses       
+        # Validação cruzada (realizado em 2023)
+        # Obter a entrada do usuário (periodos a prever)
+                
         def monta_df_prev(df):
             data_atual = max(df['dt_periodo'])
             data_inicial = data_atual + relativedelta(months=1)
@@ -114,95 +153,100 @@ def gera_proj_agrup(molecula, num_meses):
             df_datas2 = pd.DataFrame({'dt_periodo': pd.date_range(start=data_6_meses, end=data_atual, freq='D')})
             df_y_predito = df_datas2[df_datas2['dt_periodo'].dt.day == 1]
             return [df_predict, df_y_predito]
-        
-        # Generate forecast
-        def gera_prev(df):
+                
+        def gera_prev(df, nome_prev):
             df_predict = monta_df_prev(df)[0]
             df_y_predito = monta_df_prev(df)[1]
-        
-            # Define list of columns to forecast
+
+            # Definindo lista de colunas em que faremos a previsão
             lista_cols = list(df.columns)
             del lista_cols[0]
-            
-            # Sort DataFrame by date
+
+            #% Tratando o index
             df_orig = df.sort_values(by='dt_periodo')
             df_orig['dt_periodo'] = pd.to_datetime(df_orig['dt_periodo'], format='%Y-%m-%d', dayfirst=True)
-
-            # Set date column as index
             df_orig.set_index('dt_periodo', drop=True, inplace=True)
+
             
-            # Loop through columns to forecast          
+            exp = TSForecastingExperiment()
+
             for i in lista_cols:
                 df_aux = df_orig[[i]]
-                
-            # Initialize Time Series Forecasting Experiment
-                ## Try different configurations if an exception occurs
-                try:
-                    exp = TSForecastingExperiment()
-                    exp.setup(df_aux, fh=12, session_id=42, html=False)
-                except:
-                    try:
-                        exp = TSForecastingExperiment()
-                        exp.setup(df_aux, fold=2, fh=12, session_id=42, html=False)
-                    except:
-                        exp = TSForecastingExperiment()
-                        exp.setup(df_aux, fold=1, fh=12, session_id=42, html=False)
-                
-                # Compare models and choose the best one
-                melhor_modelo = exp.compare_models(sort = 'MAPE', turbo=False, verbose=False)
-                modelo = exp.create_model(melhor_modelo)
-                                    
-                # Create and finalize model (Train, Text and Predict)
-                try:
-                    y_treino = exp.get_config("y_train")
-                    y_teste = exp.get_config("y_test")
 
-                    # Predict results
-                    y_predito = exp.predict_model(modelo)
-                    
-                    # Handle index
-                    y_teste.index = y_teste.index.strftime('%Y-%m-%d')
-                    y_teste.index = pd.to_datetime(y_teste.index)
-                    new_index = y_teste.index - pd.offsets.MonthBegin(1)
-                    y_teste.index = new_index
-                    y_treino.index = y_treino.index.to_timestamp()
-                    y_predito.index = y_predito.index.to_timestamp()
-                    
-                    # Concatenate results
-                    y_predito.reset_index(inplace=True)
-                    y_predito.rename(columns={'index':'dt_periodo','y_pred':i}, inplace=True)
-                    df_y_predito = pd.merge(df_y_predito, y_predito, on='dt_periodo', how='left')
-                
-                    # Tunando modelo
-                    modelo_tunado = exp.tune_model(modelo)
-                    modelo_final = exp.finalize_model(modelo_tunado)
-                    previsoes = exp.predict_model(modelo_final,fh=n)
-                    
+                try:
+                    modelo_salvo = joblib.load(f"{model_folder}/model_agp_{nome_prev}_{molecula}_{month}_{year}.joblib")
+                    logger.info(f"Usando modelo salvo: model_agp_{molecula}_{month}_{year}.joblib")
+
+                    previsoes = exp.predict_model(modelo_salvo,fh=n)
+                        
                     # Realizando merge do resultado
                     previsoes.index = previsoes.index.to_timestamp()
                     previsoes.reset_index(inplace=True)
                     previsoes.rename(columns={'index':'dt_periodo','y_pred':i}, inplace=True)
                     df_predict = pd.merge(df_predict, previsoes, on='dt_periodo', how='left')
                     
-                except:
-                    pass
+                except Exception as e:
+                    logger.info(f"Modelo não encontrado. Treinando novo modelo. Erro: {e}")
 
-            # Adjust negative values to zero
-            df_predict.iloc[:,1:] = df_predict.iloc[:,1:].applymap(lambda x: 0 if x < 0 else x)
+                    # Escolhendo melhor modelo estatístico
+                    try:
+                        exp.setup(df_aux, fh=12, session_id=42, html=False)
+                    except:
+                        try:
+                            exp.setup(df_aux, fold=2, fh=12, session_id=42, html=False)
+                        except:
+                            exp.setup(df_aux, fold=1, fh=12, session_id=42, html=False)
 
-            # Return prediction and y_predicted DataFrames
+                    melhor_modelo = exp.compare_models(sort='MAPE', turbo=False, verbose=False)
+                    modelo = exp.create_model(melhor_modelo)
+
+                    # Gerando bases de treino teste e previsao
+                    y_treino = exp.get_config("y_train")
+                    y_teste = exp.get_config("y_test")
+                    y_teste.index = y_teste.index.strftime('%Y-%m-%d')
+                    y_teste.index = pd.to_datetime(y_teste.index)
+                    new_index = y_teste.index - pd.offsets.MonthBegin(1)
+                    y_teste.index = new_index
+                    y_treino.index = y_treino.index.to_timestamp()
+
+                    y_predito = exp.predict_model(modelo)
+
+                    # Concatenando resultados do y_predito
+                    y_predito.reset_index(inplace=True)
+                    y_predito.rename(columns={'index': 'dt_periodo', 'y_pred': i}, inplace=True)
+                    df_y_predito = pd.merge(df_y_predito, y_predito, on='dt_periodo', how='left')
+
+                    # Tunando modelo
+                    modelo_tunado = exp.tune_model(modelo)
+                    modelo_final = exp.finalize_model(modelo_tunado)
+
+                    # Salvando modelo
+                    model_filename = f"{model_folder}/model_agp_{nome_prev}_{molecula}_{month}_{year}.joblib"
+                    joblib.dump(modelo_final, model_filename)
+                    logger.info(f"Modelo model_agp_{molecula}_{month}_{year}.joblib salvo com sucesso")
+
+                    previsoes = exp.predict_model(modelo_final, fh=n)
+
+                    # Realizando merge do resultado
+                    previsoes.index = previsoes.index.to_timestamp()
+                    previsoes.reset_index(inplace=True)
+                    previsoes.rename(columns={'index': 'dt_periodo', 'y_pred': i}, inplace=True)
+                    df_predict = pd.merge(df_predict, previsoes, on='dt_periodo', how='left')
+
+            df_predict.iloc[:, 1:] = df_predict.iloc[:, 1:].applymap(lambda x: 0 if x < 0 else x)
             return [df_predict, df_y_predito]
-        
-        resultado_full = gera_prev(df_formatado)
+
+        # Assuming df_formatado, df_antes_pan, and df_apos_pan are defined
+        resultado_full = gera_prev(df_formatado, "full")
         df_predict_full, df_y_predito_full = resultado_full[0], resultado_full[1]
-        
-        resultado_antes = gera_prev(df_antes_pan)
+
+        resultado_antes = gera_prev(df_antes_pan, "antes")
         df_predict_antes, df_y_predito_antes = resultado_antes[0], resultado_antes[1]
-        
-        resultado_apos = gera_prev(df_apos_pan)
+
+        resultado_apos = gera_prev(df_apos_pan, "apos")
         df_predict_apos, df_y_predito_apos = resultado_apos[0], resultado_apos[1]
         
-        #%% Best Period Frame
+        # MELHOR RECORTE DE DATAS (Validação de 6 meses)
         def validacao(df):
             df['dt_periodo'] = pd.to_datetime(df['dt_periodo'], format='%Y-%m-%d', dayfirst=True)
             data_atual = max(df['dt_periodo'])
@@ -213,7 +257,7 @@ def gera_proj_agrup(molecula, num_meses):
         
         df_validacao = validacao(df_formatado)
         
-        #%% Calculate MAPE
+        # Calcular o Erro Médio Percentual Absoluto (MAPE)
         def calcula_mape(y_predito):
             mape = np.mean(np.abs((df_validacao.iloc[:, 1:] - y_predito.iloc[:, 1:]) / df_validacao.iloc[:, 1:])) * 100
             return mape
@@ -226,7 +270,6 @@ def gera_proj_agrup(molecula, num_meses):
         df_mape_antes = pd.DataFrame(columns=['Value'])
         df_mape_apos = pd.DataFrame(columns=['Value'])
         
-        # Filter DataFrames based on MAPE comparison
         for index, value in mape_full.items():
             if value < mape_antes[index] and value < mape_apos[index]:
                 df_mape_full.loc[index] = value
@@ -247,33 +290,39 @@ def gera_proj_agrup(molecula, num_meses):
         df_predict_antes_filtrado = df_predict_antes.filter(df_mape_antes.index.tolist())
         df_predict_apos_filtrado = df_predict_apos.filter(df_mape_apos.index.tolist())
         
-        # Concatenate DataFrames and insert molecule column
         df_predict_final = pd.concat([df_predict_full.iloc[:, 0], df_predict_full_filtrado, df_predict_antes_filtrado, df_predict_apos_filtrado], axis=1)
         df_predict_final.insert(0, 'molecula', opcao_selecionada_molecula)
         
-
-        # Drop rows with missing values
+        #df_despivoteado = pd.melt(df_predict_final, id_vars=['molecula', 'dt_periodo'], var_name='vertical', value_name='qt_und') 
         df_predict_final.dropna(inplace=True)
-
-        # Concatenate results
         df_previsoes = pd.concat([df_previsoes, df_predict_final], ignore_index=True)
-
-    # Handle exceptions and append to errors list
-    except Exception as e:
-        erros.append({'molecula': opcao_selecionada_molecula, 'Erro': str(e)})
-
-    # Uncomment if you want to save the predictions to the database
-    #df_erros = pd.DataFrame(erros)
-
-    # Return DataFrame with predictions
-    return df_previsoes
-
-
+        #df_predict_final.to_sql('lista_nobrega_previsoes', engine, schema ='int_mercado_nc',if_exists='append',
+        #                       index=False)
     
+        #df_erros = pd.DataFrame(erros)
+        logger.info("Finished processing the data")
 
+        return df_previsoes
     
-
-    
-
-    
-
+    finally:
+        del df_formatado
+        del df_antes_pan
+        del df_apos_pan
+        del df_y_predito_full
+        del df_y_predito_antes
+        del df_y_predito_apos
+        del resultado_full
+        del resultado_antes
+        del resultado_apos
+        del df_validacao
+        del mape_full
+        del mape_antes
+        del mape_apos
+        del df_mape_full
+        del df_mape_antes
+        del df_mape_apos
+        del df_predict_full_filtrado
+        del df_predict_antes_filtrado
+        del df_predict_apos_filtrado
+        del df_predict_final
+        gc.collect()

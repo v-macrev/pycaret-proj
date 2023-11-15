@@ -1,3 +1,9 @@
+# -*- coding: utf-8 -*-
+"""
+Created on Tue Jul 18 14:27:58 2023
+
+@author: a0040447
+"""
 import pandas as pd
 
 def gera_proj_ajustada(proj_agrup, proj_seg):
